@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid31119",
+  "B": "/home/dev/feedback/uid31119",
+  "sha": "80a3345811bf4ad9d72eaacffec2f812cf1333c4",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "aircrack-ng",
+    "repo": "aircrack-ng",
+    "sha": "80a3345811bf4ad9d72eaacffec2f812cf1333c4"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "aircrack-ng",
+    "cloneUrl": "https://github.com/Rrr119/aircrack-ng.git"
+  },
+  "at": "2026-11-20T23:00:57.514Z"
+}

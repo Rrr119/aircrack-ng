@@ -1333,6 +1333,132 @@ static int calculate_wep_keystream(unsigned char * body,
 	return (0);
 }
 
+static void wpa_session_discard_attempt(struct ST_info * st)
+{
+	REQUIRE(st != NULL);
+
+	if (st->wpa.state != 0) st->wpa_retry_count++;
+	memset(&st->wpa, 0, sizeof(struct WPA_hdsk));
+}
+
+static void
+wpa_session_begin_attempt(struct ST_info * st, uint64_t now_us, uint64_t replay)
+{
+	REQUIRE(st != NULL);
+
+	wpa_session_discard_attempt(st);
+	st->wpa.timestamp_start_us = now_us;
+	st->wpa.timestamp_last_us = now_us;
+	st->wpa.replay = replay;
+}
+
+static void
+wpa_session_remember_handshake(struct AP_info * ap, struct ST_info * st)
+{
+	REQUIRE(ap != NULL);
+	REQUIRE(st != NULL);
+
+	if (st->wpa_fourway_valid)
+	{
+		memcpy(&ap->wpa_fourway,
+			   &st->wpa_fourway,
+			   sizeof(struct WPA_hdsk));
+		ap->wpa_fourway_valid = 1;
+		memcpy(&ap->wpa, &st->wpa_fourway, sizeof(struct WPA_hdsk));
+	}
+	else if (st->wpa_pmkid_valid)
+	{
+		memcpy(&ap->wpa_pmkid,
+			   &st->wpa_pmkid,
+			   sizeof(struct WPA_hdsk));
+		ap->wpa_pmkid_valid = 1;
+
+		if (!ap->wpa_fourway_valid)
+			memcpy(&ap->wpa, &st->wpa_pmkid, sizeof(struct WPA_hdsk));
+	}
+}
+
+static void wpa_session_commit_handshake(struct AP_info * ap,
+										 struct ST_info * st,
+										 const unsigned char * station)
+{
+	REQUIRE(ap != NULL);
+	REQUIRE(st != NULL);
+	REQUIRE(station != NULL);
+
+	const uint8_t keyver = (uint8_t) (st->wpa.keyver & 7);
+
+	memcpy(st->wpa.stmac, station, ETHER_ADDR_LEN);
+
+	if (st->wpa.state == 7)
+	{
+		memcpy(&st->wpa_fourway, &st->wpa, sizeof(struct WPA_hdsk));
+		st->wpa_fourway_valid = 1;
+	}
+
+	if (st->wpa.state > 0 && st->wpa.pmkid[0] != 0x00)
+	{
+		memcpy(&st->wpa_pmkid, &st->wpa, sizeof(struct WPA_hdsk));
+		st->wpa_pmkid.state = 1;
+		st->wpa_pmkid.eapol_size = 0;
+		st->wpa_pmkid.keyver = keyver;
+		st->wpa_pmkid_valid = 1;
+	}
+
+	wpa_session_remember_handshake(ap, st);
+}
+
+static void wpa_session_parse_pmkid(struct ST_info * st,
+									const unsigned char * frame,
+									size_t caplen,
+									size_t offset,
+									uint8_t key_descriptor_version)
+{
+	REQUIRE(st != NULL);
+	REQUIRE(frame != NULL);
+
+	if (caplen < offset + 99) return;
+
+	const size_t key_data_len
+		= ((size_t) frame[offset + 97] << 8) | frame[offset + 98];
+	const unsigned char * data = frame + offset + 99;
+	const unsigned char * frame_end = frame + caplen;
+	const size_t available = (size_t) (frame_end - data);
+	const unsigned char * end
+		= data + (key_data_len < available ? key_data_len : available);
+	const uint8_t rsn_oui[] = {RSN_OUI & 0xff,
+							   (RSN_OUI >> 8) & 0xff,
+							   (RSN_OUI >> 16) & 0xff};
+
+	while (data + 2 <= end)
+	{
+		const size_t ie_len = (size_t) data[1] + 2;
+		const size_t rsn_len = data[1];
+
+		if (ie_len > (size_t) (end - data)) break;
+
+		if (data[0] == IEEE80211_ELEMID_VENDOR && rsn_len >= 4
+			&& memcmp(data + 2, rsn_oui, sizeof(rsn_oui)) == 0)
+		{
+			const size_t pmkid_offset = 2 + sizeof(rsn_oui) + 1;
+
+			if (data[2 + sizeof(rsn_oui)] == 4
+				&& ie_len >= pmkid_offset + 16
+				&& memcmp(ZERO, data + pmkid_offset, 16) != 0)
+			{
+				memcpy(st->wpa.pmkid, data + pmkid_offset, 16);
+				st->wpa.keyver = key_descriptor_version;
+#ifdef XDEBUG
+				fprintf(stderr, "FOUND valid CCM PMKID\n");
+#endif
+				return;
+			}
+		}
+
+		data += ie_len;
+	}
+}
+
 /**
  * Updates the current AP with additional information, such as stations.
  *
@@ -1466,7 +1592,7 @@ skip_station:
 	if (h80211[0] == IEEE80211_FC0_SUBTYPE_ASSOC_RESP)
 	{
 		/* reset the WPA handshake state */
-		if (st_cur != NULL) st_cur->wpa.state = 0;
+		if (st_cur != NULL) wpa_session_discard_attempt(st_cur);
 	}
 
 	/* check if data */
@@ -1578,6 +1704,8 @@ skip_station:
 		return (1);
 	}
 
+	if (z + 99 > pkh->caplen) return (0);
+
 	const uint64_t now_us = pkh->tv_sec * SECOND_TO_MICROSEC + pkh->tv_usec;
 	const uint64_t replay_counter
 		= be64_to_cpu(get_unaligned((uint64_t *) (&h80211[z + 9])));
@@ -1586,8 +1714,15 @@ skip_station:
 		&& subs_u64(now_us, st_cur->wpa.timestamp_start_us)
 			   > eapol_max_fourway_timeout)
 	{
-		fprintf(stderr, "Resetting EAPOL Handshake decoder state.\n");
-		memset(&st_cur->wpa, 0, sizeof(struct WPA_hdsk));
+		fprintf(stderr, "EAPOL handshake timed out; retrying session.\n");
+		wpa_session_discard_attempt(st_cur);
+	}
+	else if (st_cur->wpa.timestamp_last_us > 0
+			 && subs_u64(now_us, st_cur->wpa.timestamp_last_us)
+					> eapol_interframe_timeout)
+	{
+		fprintf(stderr, "EAPOL inter-frame timeout; retrying session.\n");
+		wpa_session_discard_attempt(st_cur);
 	}
 
 	/* frame 1: Pairwise == 1, Install == 0, Ack == 1, MIC == 0 */
@@ -1595,89 +1730,33 @@ skip_station:
 	if ((h80211[z + 6] & 0x08) != 0 && (h80211[z + 6] & 0x40) == 0
 		&& (h80211[z + 6] & 0x80) != 0 && (h80211[z + 5] & 0x01) == 0)
 	{
-		if (st_cur->wpa.timestamp_start_us == 0)
+		if (st_cur->wpa.state == 0 || st_cur->wpa.replay != replay_counter
+			|| st_cur->wpa.state == 7)
 		{
-			st_cur->wpa.timestamp_start_us = now_us;
-			st_cur->wpa.timestamp_last_us = now_us;
+			wpa_session_begin_attempt(st_cur, now_us, replay_counter);
 		}
-		if (subs_u64(now_us, st_cur->wpa.timestamp_last_us)
-			> eapol_interframe_timeout)
-		{
-			// exceeds the inter-frame timeout period
-			memset(&st_cur->wpa, 0, sizeof(struct WPA_hdsk));
-			st_cur->wpa.timestamp_start_us = now_us;
-		}
+
 		// update last recv time.
 		st_cur->wpa.timestamp_last_us = now_us;
 
 		/* authenticator nonce set */
-		st_cur->wpa.state = 1;
+		st_cur->wpa.state |= 1;
 		memcpy(st_cur->wpa.anonce, &h80211[z + 17], sizeof(st_cur->wpa.anonce));
 
 		st_cur->wpa.found |= 1 << 1;
 
 		st_cur->wpa.replay = replay_counter;
 
-		uint8_t key_descriptor_version = (uint8_t) (h80211[z + 6] & 7);
+		const uint8_t key_descriptor_version
+			= (uint8_t) (h80211[z + 6] & 7);
+		if (key_descriptor_version > 0)
+			wpa_session_parse_pmkid(st_cur,
+									h80211,
+									pkh->caplen,
+									z,
+									key_descriptor_version);
 
-		p = h80211 + z + 99;
-
-		while (p < h80211 + pkh->caplen)
-		{
-			if (p + 2 + p[1] > h80211 + pkh->caplen) break;
-#ifdef XDEBUG
-			fprintf(stderr, "IE element: %d\n", p[0]);
-			fprintf(stderr, "IE length: %d\n", p[1]);
-#endif
-			if (p[0] == IEEE80211_ELEMID_VENDOR)
-			{
-				size_t rsn_len = p[1];
-				size_t pos = 2;
-				const uint8_t rsn_oui[] = {RSN_OUI & 0xff,
-										   (RSN_OUI >> 8) & 0xff,
-										   (RSN_OUI >> 16) & 0xff};
-#ifdef XDEBUG
-				fprintf(stderr, "RSN length: %zd\n", rsn_len);
-				fprintf(stderr,
-						"OUI is %02x:%02x:%02x\n",
-						p[pos],
-						p[pos + 1],
-						p[pos + 2]);
-#endif
-				if (memcmp(rsn_oui, &p[pos], 3) == 0)
-				{
-					if (pos + 3 > rsn_len) goto rsn_out;
-					pos += 3; // advance over RSN OUI
-
-#ifdef XDEBUG
-					fprintf(stderr,
-							"The cipher tag value '%d' is used with the key "
-							"descriptor version '%d'\n",
-							p[pos],
-							key_descriptor_version);
-#endif
-					if (pos + 1 > rsn_len) goto rsn_out;
-					pos += 1; // advance over tag value
-
-					if (key_descriptor_version > 0
-						&& memcmp(ZERO, &p[pos], 16) //-V512
-							   != 0)
-					{
-#ifdef XDEBUG
-						fprintf(stderr, "FOUND valid CCM PMKID\n");
-#endif
-						// Got a PMKID value?!
-						memcpy(st_cur->wpa.pmkid, &p[pos], 16);
-
-						/* copy the key descriptor version */
-						st_cur->wpa.keyver = key_descriptor_version;
-					}
-				}
-			}
-
-			p += 2 + p[1];
-		}
-	rsn_out:;
+		wpa_session_commit_handshake(ap_cur, st_cur, stmac);
 	}
 
 	/* frame 2 or 4: Pairwise == 1, Install == 0, Ack == 0, MIC == 1 */
@@ -1685,35 +1764,24 @@ skip_station:
 	if ((h80211[z + 6] & 0x08) != 0 && (h80211[z + 6] & 0x40) == 0
 		&& (h80211[z + 6] & 0x80) == 0 && (h80211[z + 5] & 0x01) != 0)
 	{
-		if (st_cur->wpa.timestamp_start_us == 0)
+		const uint16_t key_data_len
+			= (uint16_t) ((h80211[z + 97] << 8u) | h80211[z + 98]);
+
+		if (st_cur->wpa.state == 0 || st_cur->wpa.replay != replay_counter)
 		{
-			st_cur->wpa.timestamp_start_us = now_us;
-			st_cur->wpa.timestamp_last_us = now_us;
+			/*
+			 * A stale M4 can arrive after a new M1/M2 pair.  Do not let an
+			 * old acknowledgement tear down the current retry.
+			 */
+			if (st_cur->wpa.state != 0
+				&& replay_counter < st_cur->wpa.replay && key_data_len == 0)
+				return (0);
+
+			wpa_session_begin_attempt(st_cur, now_us, replay_counter);
 		}
-		INVARIANT(now_us > 0);
-		INVARIANT(st_cur->wpa.timestamp_start_us != 0);
-		INVARIANT(st_cur->wpa.timestamp_last_us != 0);
-		if (subs_u64(now_us, st_cur->wpa.timestamp_last_us)
-			> eapol_interframe_timeout)
-		{
-			// exceeds the inter-frame timeout period
-			st_cur->wpa.found &= ~((1 << 4) | (1 << 2)); // unset M2 and M4
-			fprintf(stderr, "Inter-frame timeout period exceeded.\n");
-			return (1);
-		}
+
 		// update last recv time.
 		st_cur->wpa.timestamp_last_us = now_us;
-
-		if (st_cur->wpa.state == 0)
-		{
-			// no M1; so we store the M2 replay counter.
-			st_cur->wpa.replay = replay_counter;
-		}
-		else if (st_cur->wpa.replay != replay_counter)
-		{
-			// Bad replay counter value in message M2 or M4.
-			return (1);
-		}
 
 		if (memcmp(&h80211[z + 17], ZERO, sizeof(st_cur->wpa.snonce)) != 0)
 		{
@@ -1725,10 +1793,6 @@ skip_station:
 			st_cur->wpa.state |= 2;
 		}
 
-		// uint16_t key_len = ((h80211[z + 7] << 8u) + h80211[z + 8]);
-		uint16_t key_data_len
-			= (h80211[z + 81 + 16] << 8u) + h80211[z + 81 + 17];
-
 		if (key_data_len == 0)
 		{
 			st_cur->wpa.found |= 1 << 4; // frame 4
@@ -1738,7 +1802,12 @@ skip_station:
 			st_cur->wpa.found |= 1 << 2; // frame 2
 		}
 
-		if ((st_cur->wpa.state & 4) != 4)
+		/*
+		 * Keep the newest M2.  This also repairs an association when a
+		 * retry reuses the same replay counter but carries a corrected MIC.
+		 * M4 is only used when no other EAPOL frame was stored.
+		 */
+		if ((st_cur->wpa.state & 4) != 4 || key_data_len != 0)
 		{
 			/* copy the MIC & eapol frame */
 			st_cur->wpa.eapol_size
@@ -1746,7 +1815,7 @@ skip_station:
 
 			if (st_cur->wpa.eapol_size == 0 //-V560
 				|| st_cur->wpa.eapol_size > sizeof(st_cur->wpa.eapol)
-				|| pkh->len - z < st_cur->wpa.eapol_size)
+				|| pkh->caplen - z < st_cur->wpa.eapol_size)
 			{
 				// Ignore the packet trying to crash us.
 				st_cur->wpa.eapol_size = 0;
@@ -1773,29 +1842,37 @@ skip_station:
 			/* copy the key descriptor version */
 			st_cur->wpa.keyver = (uint8_t) (h80211[z + 6] & 7);
 		}
+
+		wpa_session_commit_handshake(ap_cur, st_cur, stmac);
 	}
 
 	/* frame 3: Pairwise == 1, Install == 1, Ack == 1, MIC == 1 */
-	/* M3's replay counter MUST be larger than M1/M2's. */
 
 	if ((h80211[z + 6] & 0x08) != 0 && (h80211[z + 6] & 0x40) != 0
-		&& (h80211[z + 6] & 0x80) != 0 && (h80211[z + 5] & 0x01) != 0
-		&& st_cur->wpa.replay < replay_counter)
+		&& (h80211[z + 6] & 0x80) != 0 && (h80211[z + 5] & 0x01) != 0)
 	{
-		if (st_cur->wpa.timestamp_start_us == 0)
+		if (st_cur->wpa.state == 0)
 		{
-			st_cur->wpa.timestamp_start_us = now_us;
-			st_cur->wpa.timestamp_last_us = now_us;
+			wpa_session_begin_attempt(st_cur, now_us, replay_counter);
 		}
-		INVARIANT(st_cur->wpa.timestamp_last_us != 0);
-		if (subs_u64(now_us, st_cur->wpa.timestamp_last_us)
-			> eapol_interframe_timeout)
+		else if (replay_counter < st_cur->wpa.replay)
 		{
-			// exceeds the inter-frame timeout period
-			st_cur->wpa.found &= ~(1 << 3); // unset M3
-			fprintf(stderr, "Inter-frame timeout period exceeded.\n");
-			return (1);
+			return (0);
 		}
+		else if (replay_counter != st_cur->wpa.replay)
+		{
+			/*
+			 * M3 normally increments the replay counter after M1/M2.  Keep
+			 * the supplicant data from M2 while adopting M3's authenticator
+			 * nonce.  A completed old attempt is only replaced when there is
+			 * no M2 state to carry forward.
+			 */
+			if (st_cur->wpa.state == 7)
+				wpa_session_begin_attempt(st_cur, now_us, replay_counter);
+			else
+				st_cur->wpa.replay = replay_counter;
+		}
+
 		// update last recv time.
 		st_cur->wpa.timestamp_last_us = now_us;
 
@@ -1821,7 +1898,7 @@ skip_station:
 
 			if (st_cur->wpa.eapol_size == 0 //-V560
 				|| st_cur->wpa.eapol_size > sizeof(st_cur->wpa.eapol)
-				|| pkh->len - z < st_cur->wpa.eapol_size)
+				|| pkh->caplen - z < st_cur->wpa.eapol_size)
 			{
 				// Ignore the packet trying to crash us.
 				st_cur->wpa.eapol_size = 0;
@@ -1841,16 +1918,8 @@ skip_station:
 			/* copy the key descriptor version */
 			st_cur->wpa.keyver = (uint8_t) (h80211[z + 6] & 7);
 		}
-	}
 
-	// The new PMKID attack permits any state greater than 0, with a PMKID
-	// present.
-	if (st_cur->wpa.state == 7
-		|| (st_cur->wpa.state > 0 && st_cur->wpa.pmkid[0] != 0x00))
-	{
-		/* got one valid handshake */
-		memcpy(st_cur->wpa.stmac, stmac, ETHER_ADDR_LEN);
-		memcpy(&ap_cur->wpa, &st_cur->wpa, sizeof(struct WPA_hdsk));
+		wpa_session_commit_handshake(ap_cur, st_cur, stmac);
 	}
 
 	return (0);
@@ -7044,6 +7113,11 @@ int main(int argc, char * argv[])
 				INVARIANT(st_tmp != NULL);
 
 				memset(&st_tmp->wpa, 0, sizeof(struct WPA_hdsk));
+				memset(&st_tmp->wpa_pmkid, 0, sizeof(struct WPA_hdsk));
+				memset(&st_tmp->wpa_fourway, 0, sizeof(struct WPA_hdsk));
+				st_tmp->wpa_pmkid_valid = 0;
+				st_tmp->wpa_fourway_valid = 0;
+				st_tmp->wpa_retry_count = 0;
 			}
 		}
 	}

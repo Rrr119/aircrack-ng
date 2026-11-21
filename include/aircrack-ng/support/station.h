@@ -148,7 +148,11 @@ struct AP_info
 	int target; /* flag set if AP is a target   */
 	struct ST_info * st_1st; /* DEPRECATED: linked list of stations */
 	c_avl_tree_t * stations; /* AVL tree of stations keyed on MAC*/
-	struct WPA_hdsk wpa; /* valid WPA handshake data     */
+	struct WPA_hdsk wpa; /* selected WPA handshake data  */
+	struct WPA_hdsk wpa_pmkid; /* PMKID-only handshake data    */
+	struct WPA_hdsk wpa_fourway; /* four-way handshake data      */
+	uint8_t wpa_pmkid_valid;
+	uint8_t wpa_fourway_valid;
 	PTW_attackstate * ptw_clean;
 	PTW_attackstate * ptw_vague;
 
@@ -189,7 +193,12 @@ struct ST_info
 	struct ST_info * next; /* the next client in list   */
 	struct AP_info * base; /* AP this client belongs to */
 	uint8_t stmac[6]; /* the client's MAC address  */
-	struct WPA_hdsk wpa; /* WPA handshake data        */
+	struct WPA_hdsk wpa; /* in-progress handshake     */
+	struct WPA_hdsk wpa_pmkid; /* completed PMKID candidate */
+	struct WPA_hdsk wpa_fourway; /* completed four-way candidate */
+	uint8_t wpa_pmkid_valid;
+	uint8_t wpa_fourway_valid;
+	uint16_t wpa_retry_count; /* discarded incomplete attempts */
 
 	char * manuf; /* the client's manufacturer */
 

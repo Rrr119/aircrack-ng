@@ -160,6 +160,19 @@ n-02.cap:
 test-pmkid.pcap:
     This is a test file with PMKID. Passphrase for 'WLAN-771698' is 'SP-91862D361'
 
+handshake-aggregate.pcap:
+    Two clients are associated with one BSSID. The first client only has M1,
+    while the second has a complete PMKID-capable four-way handshake.
+    The passphrase is '12345678'.
+
+handshake-dual-path.pcap:
+    Contains one PMKID-only BSSID and one four-way-only BSSID.
+    The passphrase is '12345678'.
+
+handshake-retry.pcap:
+    Contains a broken four-way attempt followed by a valid retry for the same
+    BSSID/client association. The passphrase is '12345678'.
+
 test1.pcap:
     This is another test file with PMKID. Passphrase for the network
     'ogogo' is '15211521'

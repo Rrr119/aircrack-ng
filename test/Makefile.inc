@@ -77,6 +77,9 @@ TESTS += %D%/test-hex_string_to_array.sh \
 		 %D%/test-aircrack-ng-0022.sh \
 		 %D%/test-aircrack-ng-0023.sh \
 		 %D%/test-aircrack-ng-0024.sh \
+		 %D%/test-aircrack-ng-0025.sh \
+		 %D%/test-aircrack-ng-0026.sh \
+		 %D%/test-aircrack-ng-0027.sh \
 		 %D%/test-airdecap-ng-0001.sh \
 		 %D%/test-airdecap-ng-0002.sh \
 		 %D%/test-airdecap-ng-0003.sh \
@@ -139,6 +142,9 @@ EXTRA_DIST += %D%/test-hex_string_to_array.sh \
 			  %D%/test-aircrack-ng-0022.sh \
 			  %D%/test-aircrack-ng-0023.sh \
 			  %D%/test-aircrack-ng-0024.sh \
+			  %D%/test-aircrack-ng-0025.sh \
+			  %D%/test-aircrack-ng-0026.sh \
+			  %D%/test-aircrack-ng-0027.sh \
 			  %D%/test-airdecap-ng-0001.sh \
 			  %D%/test-airdecap-ng-0002.sh \
 			  %D%/test-airdecap-ng-0003.sh \
@@ -181,6 +187,10 @@ EXTRA_DIST += %D%/test-hex_string_to_array.sh \
 			  %D%/pass.txt \
 			  %D%/test23.pcap \
 			  %D%/testm1m2m3.pcap \
+			  %D%/handshake-aggregate.pcap \
+			  %D%/handshake-dual-path.pcap \
+			  %D%/handshake-retry.pcap \
+			  %D%/generate-handshake-captures.py \
               %D%/pmkid-not-recognized.cap
 
 if EXPECT
